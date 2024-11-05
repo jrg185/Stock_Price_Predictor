@@ -16,41 +16,71 @@ class StockAnalyzer:
         self.symbol = symbol
     
     def fetch_data(self):
-        """Fetch and prepare stock data"""
-        print(f"\nFetching data for {self.symbol}...\n")
-        df = yf.download(self.symbol, start='2020-01-01', progress=False)
-        
-        if isinstance(df.columns, pd.MultiIndex):
-            df = df.droplevel(level=1, axis=1)
-        
-        if 'Close' not in df.columns or df['Close'].isnull().all():
-            raise ValueError("Error: 'Close' column is missing or contains no data.")
-        
-        # Add technical indicators
-        df['Returns'] = df['Close'].pct_change()
-        df['SMA20'] = df['Close'].rolling(window=20).mean()
-        df['SMA50'] = df['Close'].rolling(window=50).mean()
-        
-        # RSI Calculation
-        delta = df['Close'].diff()
-        gain = delta.clip(lower=0)
-        loss = -1 * delta.clip(upper=0)
-        avg_gain = gain.rolling(window=14).mean()
-        avg_loss = loss.rolling(window=14).mean()
-        rs = avg_gain / avg_loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        """Fetch and prepare stock data with retries and better error handling"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                print(f"\nFetching data for {self.symbol}... (Attempt {attempt + 1}/{max_retries})")
+                
+                # Try different date ranges if needed
+                if attempt == 0:
+                    df = yf.download(self.symbol, start='2020-01-01', progress=False)
+                elif attempt == 1:
+                    # Try a more recent start date
+                    df = yf.download(self.symbol, start='2022-01-01', progress=False)
+                else:
+                    # Try with period instead of start date
+                    df = yf.download(self.symbol, period="2y", progress=False)
+                
+                if df.empty:
+                    print(f"No data found for {self.symbol} on attempt {attempt + 1}")
+                    continue
+                    
+                if isinstance(df.columns, pd.MultiIndex):
+                    df = df.droplevel(level=1, axis=1)
+                
+                if 'Close' not in df.columns:
+                    print(f"Missing 'Close' column for {self.symbol} on attempt {attempt + 1}")
+                    continue
+                    
+                if df['Close'].isnull().all():
+                    print(f"No valid closing prices for {self.symbol} on attempt {attempt + 1}")
+                    continue
+                
+                # If we got here, we have valid data
+                print(f"Successfully fetched data for {self.symbol}")
+                
+                # Add technical indicators
+                df['Returns'] = df['Close'].pct_change()
+                df['SMA20'] = df['Close'].rolling(window=20).mean()
+                df['SMA50'] = df['Close'].rolling(window=50).mean()
+                
+                # RSI Calculation
+                delta = df['Close'].diff()
+                gain = delta.clip(lower=0)
+                loss = -1 * delta.clip(upper=0)
+                avg_gain = gain.rolling(window=14).mean()
+                avg_loss = loss.rolling(window=14).mean()
+                rs = avg_gain / avg_loss
+                df['RSI'] = 100 - (100 / (1 + rs))
 
-        # ATR Calculation
-        high_low = df['High'] - df['Low']
-        high_close = np.abs(df['High'] - df['Close'].shift())
-        low_close = np.abs(df['Low'] - df['Close'].shift())
-        tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(window=14).mean()
+                # ATR Calculation
+                high_low = df['High'] - df['Low']
+                high_close = np.abs(df['High'] - df['Close'].shift())
+                low_close = np.abs(df['Low'] - df['Close'].shift())
+                tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+                df['ATR'] = tr.rolling(window=14).mean()
 
-        # Volume ratio
-        df['Volume_Ratio'] = df['Volume'] / df['Volume'].rolling(window=50).mean()
+                # Volume ratio
+                df['Volume_Ratio'] = df['Volume'] / df['Volume'].rolling(window=50).mean()
 
-        return df
+                return df
+                
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {str(e)}")
+                if attempt == max_retries - 1:
+                    raise ValueError(f"Failed to fetch data for {self.symbol} after {max_retries} attempts: {str(e)}")
+                continue
 
     def predict_future_prices_with_linear_regression(self, df, days=90):
         """Predict future prices using linear regression with robust handling for volatile stocks"""
@@ -162,14 +192,27 @@ class StockAnalyzer:
         atr = latest['ATR']
 
         # Calculate additional metrics
-        volatility = df['Returns'].std() * np.sqrt(252)
+        volatility = df['Returns'].std() * np.sqrt(252)  # Annualized volatility
         annual_return = df['Returns'].mean() * 252
         sharpe_ratio = annual_return / volatility if volatility != 0 else 0
         
+        # Enhanced trading signal logic
         signal = 'HOLD'
-        if price > sma20 and price > sma50 and rsi < 40 and volume_ratio > 1.2:
+        
+        # Buy conditions:
+        # 1. Extremely oversold (RSI < 30)
+        # 2. OR Price below both SMAs with improving RSI
+        # 3. OR Strong volume with price above SMAs
+        if (rsi < 30) or \
+        (price < sma20 and price < sma50 and rsi > df['RSI'].shift(1).iloc[-1]) or \
+        (price > sma20 and price > sma50 and volume_ratio > 1.2):
             signal = 'BUY'
-        elif price < sma20 and price < sma50 and rsi > 60:
+        
+        # Sell conditions:
+        # 1. Extremely overbought (RSI > 70)
+        # 2. OR Price below both SMAs with declining volume
+        elif (rsi > 70) or \
+            (price < sma20 and price < sma50 and volume_ratio < 0.8):
             signal = 'SELL'
 
         future_lr, summary_lr = self.predict_future_prices_with_linear_regression(df)
@@ -284,6 +327,9 @@ pass
 
 def create_candlestick_plot(df, future_lr, future_arima):
     """Create interactive candlestick chart with predictions"""
+    # Filter for last 24 months
+    df = df.last('730D')  # 730 days = 24 months (approximately)
+    
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.03, 
                         row_heights=[0.7, 0.3])
@@ -325,7 +371,7 @@ def create_candlestick_plot(df, future_lr, future_arima):
 
     # Update layout
     fig.update_layout(
-        title='Stock Price Analysis with Predictions',
+        title='Stock Price Analysis with Predictions (Last 24 Months)',
         yaxis_title='Stock Price ($)',
         yaxis2_title='Volume',
         xaxis_rangeslider_visible=False,
@@ -343,119 +389,118 @@ def main():
     st.set_page_config(layout="wide")
     st.title("Stock Analysis Dashboard")
 
-    # Sidebar inputs
-    st.sidebar.header("Settings")
-    symbol = st.sidebar.text_input("Enter Stock Symbol:", value="AAPL").upper()
-    prediction_days = st.sidebar.slider("Prediction Days:", 5, 90, 30)
-    
+    # Fixed header for inputs
+    with st.container():
+        st.markdown("### Settings")
+        col_input1, col_input2, col_input3 = st.columns([2, 1, 1])
+        with col_input1:
+            symbol = st.text_input("Enter Stock Symbol:", value="AAPL").upper()
+        with col_input2:
+            prediction_days = st.slider("Prediction Days:", 5, 90, 30)
+        with col_input3:
+            analyze_button = st.button("Analyze")
+
     # Main analysis
-    if st.sidebar.button("Analyze"):
+    if analyze_button:
         try:
             analyzer = StockAnalyzer(symbol)
-            df = analyzer.fetch_data()
-            
-            if df is not None:
-                analysis = analyzer.analyze_position(df)
+            with st.spinner(f'Fetching data for {symbol}...'):
+                df = analyzer.fetch_data()
+
+            if df is not None and not df.empty:
+                analysis = analyzer.analyze_position(df)  # This already shows the analysis plots
+
+                # Tables at top
+                st.markdown("### Key Metrics")
+                col1, col2, col3 = st.columns([1, 1, 1])
                 
-                # Create two columns
-                col1, col2 = st.columns([2, 1])
-                
+                # Current metrics table
                 with col1:
-                    st.subheader("Price Chart and Predictions")
-                    # Create and display interactive plot
-                    fig = create_candlestick_plot(
-                        df, 
-                        analysis['predictions']['linear_regression']['prices'],
-                        analysis['predictions']['arima']['prices']
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                with col2:
-                    # Current Metrics
                     st.subheader("Current Metrics")
                     metrics = analysis['current_metrics']
                     metrics_df = pd.DataFrame({
-                        'Metric': [
-                            'Current Price',
-                            'Trading Signal',
-                            'RSI',
-                            'Volume Ratio',
-                            'ATR',
-                            'Volatility (Annual)',
-                            'Annual Return',
-                            'Sharpe Ratio'
-                        ],
-                        'Value': [
-                            f"${metrics['price']:.2f}",
-                            metrics['signal'],
-                            f"{metrics['rsi']:.2f}",
-                            f"{metrics['volume_ratio']:.2f}",
-                            f"{metrics['atr']:.2f}",
-                            f"{metrics['volatility']*100:.2f}%",
-                            f"{metrics['annual_return']*100:.2f}%",
-                            f"{metrics['sharpe_ratio']:.2f}"
-                        ]
+                        'Metric': ['Current Price', 'Trading Signal', 'RSI', 'Volume Ratio', 'ATR', 
+                                 'Volatility (Annual)', 'Annual Return', 'Sharpe Ratio'],
+                        'Value': [f"${metrics['price']:.2f}", metrics['signal'], f"{metrics['rsi']:.2f}",
+                                f"{metrics['volume_ratio']:.2f}", f"{metrics['atr']:.2f}",
+                                f"{metrics['volatility']*100:.2f}%", f"{metrics['annual_return']*100:.2f}%",
+                                f"{metrics['sharpe_ratio']:.2f}"]
                     })
                     st.dataframe(metrics_df, hide_index=True)
-                
-                # Predictions
-                st.subheader("Price Predictions")
-                lr_pred = analysis['predictions']['linear_regression']['prices']
-                arima_pred = analysis['predictions']['arima']['prices']
-                current_price = metrics['price']
-                
-                intervals = [5, 10, 15, 30, 60, 90]
-                pred_data = []
-                
-                for i in intervals:
-                    if i <= prediction_days:
-                        idx = i - 1
-                        lr_price = lr_pred[idx]
-                        arima_price = arima_pred[idx]
-                        lr_pct = ((lr_price - current_price) / current_price) * 100
-                        arima_pct = ((arima_price - current_price) / current_price) * 100
-                        
-                        pred_data.append({
-                            'Horizon': f"{i}d",
-                            'Linear Regression': f"${lr_price:.2f} ({lr_pct:+.1f}%)",
-                            'ARIMA': f"${arima_price:.2f} ({arima_pct:+.1f}%)"
-                        })
-                
-                pred_df = pd.DataFrame(pred_data)
-                st.dataframe(pred_df, hide_index=True)
-                
-                # Model Performance Metrics
-                st.subheader("Model Performance")
-                lr_metrics = analysis['predictions']['linear_regression']['summary']
-                arima_metrics = analysis['predictions']['arima']['summary']
-                
-                perf_data = {
-                    'Metric': ['R-squared', 'RMSE', 'MAE', 'AIC', 'BIC'],
-                    'Linear Regression': [
-                        f"{lr_metrics['r_squared']:.4f}",
-                        f"{lr_metrics['rmse']:.2f}",
-                        f"{lr_metrics['mae']:.2f}",
-                        'N/A',
-                        'N/A'
-                    ],
-                    'ARIMA': [
-                        'N/A',
-                        'N/A',
-                        'N/A',
-                        f"{arima_metrics['aic']:.2f}",
-                        f"{arima_metrics['bic']:.2f}"
-                    ]
-                }
-                perf_df = pd.DataFrame(perf_data)
-                st.dataframe(perf_df, hide_index=True)
-                
+
+                # Predictions table
+                with col2:
+                    st.subheader("Price Predictions")
+                    lr_pred = analysis['predictions']['linear_regression']['prices']
+                    arima_pred = analysis['predictions']['arima']['prices']
+                    current_price = metrics['price']
+
+                    intervals = [5, 10, 15, 30, 60, 90]
+                    pred_data = []
+                    for i in intervals:
+                        if i <= prediction_days:
+                            idx = i - 1
+                            lr_price = lr_pred[idx]
+                            arima_price = arima_pred[idx]
+                            lr_pct = ((lr_price - current_price) / current_price) * 100
+                            arima_pct = ((arima_price - current_price) / current_price) * 100
+                            pred_data.append({
+                                'Horizon': f"{i}d",
+                                'Linear Regression': f"${lr_price:.2f} ({lr_pct:+.1f}%)",
+                                'ARIMA': f"${arima_price:.2f} ({arima_pct:+.1f}%)"
+                            })
+                    pred_df = pd.DataFrame(pred_data)
+                    st.dataframe(pred_df, hide_index=True)
+
+                # Model performance table
+                with col3:
+                    st.subheader("Model Performance")
+                    lr_metrics = analysis['predictions']['linear_regression']['summary']
+                    arima_metrics = analysis['predictions']['arima']['summary']
+                    perf_data = {
+                        'Metric': ['R-squared', 'RMSE', 'MAE', 'AIC', 'BIC'],
+                        'Linear Regression': [
+                            f"{lr_metrics['r_squared']:.4f}",
+                            f"{lr_metrics['rmse']:.2f}",
+                            f"{lr_metrics['mae']:.2f}",
+                            'N/A',
+                            'N/A'
+                        ],
+                        'ARIMA': [
+                            'N/A',
+                            'N/A',
+                            'N/A',
+                            f"{arima_metrics['aic']:.2f}" if arima_metrics['aic'] else 'N/A',
+                            f"{arima_metrics['bic']:.2f}" if arima_metrics['bic'] else 'N/A'
+                        ]
+                    }
+                    perf_df = pd.DataFrame(perf_data)
+                    st.dataframe(perf_df, hide_index=True)
+
+                st.markdown("---")  # Separator
+
+                # Add the candlestick chart
+                st.subheader("Price Chart (Candlestick)")
+                fig = create_candlestick_plot(
+                    df, 
+                    analysis['predictions']['linear_regression']['prices'],
+                    analysis['predictions']['arima']['prices']
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
             else:
-                st.error(f"Unable to fetch data for {symbol}")
-                
+                st.error(f"Unable to fetch data for {symbol}. This could be due to:")
+                st.write("- Symbol may be delisted or invalid")
+                st.write("- Data provider (Yahoo Finance) temporary issues")
+                st.write("- Recent corporate actions affecting the stock")
+                st.write("Please try again later or verify the stock symbol.")
+
         except Exception as e:
             st.error(f"Error analyzing {symbol}: {str(e)}")
+            st.write("If this error persists, please:")
+            st.write("1. Verify the stock symbol")
+            st.write("2. Check if the stock is actively traded")
+            st.write("3. Try again in a few minutes")
 
 if __name__ == "__main__":
     main()
-    
-    
