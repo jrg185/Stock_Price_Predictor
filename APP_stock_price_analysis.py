@@ -536,8 +536,82 @@ def main():
         df = st.session_state.current_df
         analysis = st.session_state.current_analysis
 
-        # Your existing metrics tables code here...
+        # Tables at top
+        st.markdown("### Key Metrics")
+        col1, col2, col3 = st.columns([1, 1, 1])
         
+        # Current metrics table
+        with col1:
+            st.subheader("Current Metrics")
+            metrics = analysis['current_metrics']
+            metrics_df = pd.DataFrame({
+                'Metric': ['Current Price', 'Trading Signal', 'RSI', 'Volume Ratio', 'ATR', 
+                         'Volatility (Annual)', 'Annual Return', 'Sharpe Ratio'],
+                'Value': [f"${metrics['price']:.2f}", metrics['signal'], f"{metrics['rsi']:.2f}",
+                        f"{metrics['volume_ratio']:.2f}", f"{metrics['atr']:.2f}",
+                        f"{metrics['volatility']*100:.2f}%", f"{metrics['annual_return']*100:.2f}%",
+                        f"{metrics['sharpe_ratio']:.2f}"]
+            })
+            st.dataframe(metrics_df, hide_index=True)
+
+        # Predictions table with confidence intervals
+        with col2:
+            st.subheader("Price Predictions with Confidence Intervals")
+            lr_pred = analysis['predictions']['linear_regression']['prices']
+            lr_conf = analysis['predictions']['linear_regression']['confidence_intervals']
+            arima_pred = analysis['predictions']['arima']['prices']
+            current_price = metrics['price']
+
+            intervals = [5, 10, 15, 30, 60, 90]
+            pred_data = []
+            for i in intervals:
+                if i <= prediction_days:
+                    idx = i - 1
+                    lr_price = lr_pred[idx]
+                    arima_price = arima_pred[idx]
+                    
+                    # Get confidence intervals
+                    std1_range = f"[${lr_conf['std1_lower'][idx]:.2f} - ${lr_conf['std1_upper'][idx]:.2f}]"
+                    std2_range = f"[${lr_conf['std2_lower'][idx]:.2f} - ${lr_conf['std2_upper'][idx]:.2f}]"
+                    
+                    lr_pct = ((lr_price - current_price) / current_price) * 100
+                    arima_pct = ((arima_price - current_price) / current_price) * 100
+                    
+                    pred_data.append({
+                        'Horizon': f"{i}d",
+                        'Linear Regression': f"${lr_price:.2f} ({lr_pct:+.1f}%)",
+                        '68% CI': std1_range,
+                        '95% CI': std2_range,
+                        'ARIMA': f"${arima_price:.2f} ({arima_pct:+.1f}%)"
+                    })
+            pred_df = pd.DataFrame(pred_data)
+            st.dataframe(pred_df, hide_index=True)
+
+        # Model performance table
+        with col3:
+            st.subheader("Model Performance")
+            lr_metrics = analysis['predictions']['linear_regression']['summary']
+            arima_metrics = analysis['predictions']['arima']['summary']
+            perf_data = {
+                'Metric': ['R-squared', 'RMSE', 'MAE', 'AIC', 'BIC'],
+                'Linear Regression': [
+                    f"{lr_metrics['r_squared']:.4f}",
+                    f"{lr_metrics['rmse']:.2f}",
+                    f"{lr_metrics['mae']:.2f}",
+                    'N/A',
+                    'N/A'
+                ],
+                'ARIMA': [
+                    'N/A',
+                    'N/A',
+                    'N/A',
+                    f"{arima_metrics['aic']:.2f}" if arima_metrics['aic'] else 'N/A',
+                    f"{arima_metrics['bic']:.2f}" if arima_metrics['bic'] else 'N/A'
+                ]
+            }
+            perf_df = pd.DataFrame(perf_data)
+            st.dataframe(perf_df, hide_index=True)
+
         st.markdown("---")  # Separator
 
         # Add the candlestick chart
