@@ -83,7 +83,7 @@ class StockAnalyzer:
                 continue
 
     def predict_future_prices_with_linear_regression(self, df, days=90):
-        """Predict future prices using linear regression with robust handling for volatile stocks"""
+        """Predict future prices using linear regression with robust handling for volatile stocks and standard deviation bands"""
         df = df.dropna(subset=['Close'])
         
         # Calculate rolling stats to determine trend
@@ -124,6 +124,22 @@ class StockAnalyzer:
         dampening = np.exp(-vol * np.arange(len(future_prices)) / 252)
         future_prices = current_price + (future_prices - current_price) * dampening
         
+        # Calculate standard deviation bands
+        std_daily = np.sqrt(mse)  # Daily standard deviation of prediction error
+        time_factor = np.sqrt(np.arange(1, days + 1))  # Uncertainty increases with time
+        
+        std1_upper = future_prices + std_daily * time_factor
+        std1_lower = future_prices - std_daily * time_factor
+        std2_upper = future_prices + 2 * std_daily * time_factor
+        std2_lower = future_prices - 2 * std_daily * time_factor
+        
+        confidence_intervals = {
+            'std1_upper': std1_upper,
+            'std1_lower': std1_lower,
+            'std2_upper': std2_upper,
+            'std2_lower': std2_lower
+        }
+        
         model_summary = {
             'r_squared': r_squared,
             'coefficient': coefficients,
@@ -133,7 +149,7 @@ class StockAnalyzer:
             'mae': mae
         }
 
-        return future_prices, model_summary
+        return future_prices, confidence_intervals, model_summary
 
     def predict_future_prices_with_arima(self, df, days=90):
         """Predict future prices using ARIMA with mean reversion component"""
@@ -215,11 +231,12 @@ class StockAnalyzer:
             (price < sma20 and price < sma50 and volume_ratio < 0.8):
             signal = 'SELL'
 
-        future_lr, summary_lr = self.predict_future_prices_with_linear_regression(df)
+        # Get predictions with confidence intervals
+        future_lr, lr_confidence, summary_lr = self.predict_future_prices_with_linear_regression(df)
         future_arima, summary_arima = self.predict_future_prices_with_arima(df)
 
         # Create visualizations
-        self.create_analysis_plots(df, future_lr, future_arima)
+        self.create_analysis_plots(df, future_lr, future_arima, lr_confidence)
 
         return {
             'current_metrics': {
@@ -237,6 +254,7 @@ class StockAnalyzer:
             'predictions': {
                 'linear_regression': {
                     'prices': future_lr,
+                    'confidence_intervals': lr_confidence,
                     'summary': summary_lr
                 },
                 'arima': {
@@ -246,7 +264,7 @@ class StockAnalyzer:
             }
         }
 
-    def create_analysis_plots(self, df, future_lr, future_arima):
+    def create_analysis_plots(self, df, future_lr, future_arima, lr_confidence):
         """Create comprehensive analysis plots using plotly"""
         # Create subplots
         fig = make_subplots(rows=2, cols=2, 
@@ -274,13 +292,34 @@ class StockAnalyzer:
                                 line=dict(color='red', dash='dash')),
                     row=1, col=1)
         
-        # Add predictions
+        # Add predictions and confidence intervals
         last_date = df.index[-1]
         future_dates = pd.date_range(start=last_date, periods=len(future_lr) + 1)[1:]
         
+        # Add confidence intervals (shaded areas)
+        fig.add_trace(go.Scatter(
+            x=future_dates.tolist() + future_dates.tolist()[::-1],
+            y=lr_confidence['std2_upper'].tolist() + lr_confidence['std2_lower'].tolist()[::-1],
+            fill='toself',
+            fillcolor='rgba(0,255,0,0.1)',
+            line=dict(color='rgba(255,255,255,0)'),
+            name='95% Confidence',
+            showlegend=True
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=future_dates.tolist() + future_dates.tolist()[::-1],
+            y=lr_confidence['std1_upper'].tolist() + lr_confidence['std1_lower'].tolist()[::-1],
+            fill='toself',
+            fillcolor='rgba(0,255,0,0.2)',
+            line=dict(color='rgba(255,255,255,0)'),
+            name='68% Confidence',
+            showlegend=True
+        ), row=1, col=1)
+        
         fig.add_trace(go.Scatter(x=future_dates, y=future_lr,
                                 name='Linear Regression',
-                                line=dict(color='green', dash='dot')),
+                                line=dict(color='green', dash='dash')),
                     row=1, col=1)
         
         fig.add_trace(go.Scatter(x=future_dates, y=future_arima,
@@ -322,39 +361,109 @@ class StockAnalyzer:
         fig.update_yaxes(title_text="Normalized Values", row=2, col=2)
         
         st.plotly_chart(fig, use_container_width=True)
-        
-pass
 
-def create_candlestick_plot(df, future_lr, future_arima):
-    """Create interactive candlestick chart with predictions"""
-    # Filter for last 24 months
-    df = df.last('730D')  # 730 days = 24 months (approximately)
+def create_candlestick_plot(df, future_lr, future_arima, lr_confidence, display_days):
+    """Create interactive candlestick chart with predictions and confidence intervals"""
+    # Filter dataframe to show only the selected number of days
+    df_filtered = df.last(f'{display_days}D')
     
     fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
                         vertical_spacing=0.03, 
                         row_heights=[0.7, 0.3])
 
     # Candlestick chart
-    fig.add_trace(go.Candlestick(x=df.index,
-                                open=df['Open'],
-                                high=df['High'],
-                                low=df['Low'],
-                                close=df['Close'],
+    fig.add_trace(go.Candlestick(x=df_filtered.index,
+                                open=df_filtered['Open'],
+                                high=df_filtered['High'],
+                                low=df_filtered['Low'],
+                                close=df_filtered['Close'],
                                 name='OHLC'),
                   row=1, col=1)
 
     # Add Moving Averages
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA20'],
+    fig.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['SMA20'],
                             name='SMA20', line=dict(color='orange')),
                   row=1, col=1)
-    fig.add_trace(go.Scatter(x=df.index, y=df['SMA50'],
+    fig.add_trace(go.Scatter(x=df_filtered.index, y=df_filtered['SMA50'],
                             name='SMA50', line=dict(color='blue')),
                   row=1, col=1)
 
-    # Add predictions
+    # Add predictions and confidence intervals
     last_date = df.index[-1]
     future_dates = pd.date_range(start=last_date, periods=len(future_lr) + 1)[1:]
     
+    # Select points for labels (30, 60, and 90 days out if available)
+    label_indices = [min(i, len(future_lr)-1) for i in [29, 59, 89] if i < len(future_lr)]
+    
+    # Add annotations for confidence intervals at selected points
+    for idx in label_indices:
+        # 95% CI annotation
+        fig.add_annotation(
+            x=future_dates[idx],
+            y=lr_confidence['std2_upper'][idx],
+            text=f"${lr_confidence['std2_upper'][idx]:.2f}",
+            showarrow=False,
+            yshift=10,
+            font=dict(size=10)
+        )
+        fig.add_annotation(
+            x=future_dates[idx],
+            y=lr_confidence['std2_lower'][idx],
+            text=f"${lr_confidence['std2_lower'][idx]:.2f}",
+            showarrow=False,
+            yshift=-10,
+            font=dict(size=10)
+        )
+        
+        # 68% CI annotation
+        fig.add_annotation(
+            x=future_dates[idx],
+            y=lr_confidence['std1_upper'][idx],
+            text=f"${lr_confidence['std1_upper'][idx]:.2f}",
+            showarrow=False,
+            yshift=10,
+            font=dict(size=10)
+        )
+        fig.add_annotation(
+            x=future_dates[idx],
+            y=lr_confidence['std1_lower'][idx],
+            text=f"${lr_confidence['std1_lower'][idx]:.2f}",
+            showarrow=False,
+            yshift=-10,
+            font=dict(size=10)
+        )
+        
+        # Add predicted price at this point
+        fig.add_annotation(
+            x=future_dates[idx],
+            y=future_lr[idx],
+            text=f"${future_lr[idx]:.2f}",
+            showarrow=False,
+            font=dict(size=10, color='green')
+        )
+    
+    # Add confidence intervals
+    fig.add_trace(go.Scatter(
+        x=future_dates.tolist() + future_dates.tolist()[::-1],
+        y=lr_confidence['std2_upper'].tolist() + lr_confidence['std2_lower'].tolist()[::-1],
+        fill='toself',
+        fillcolor='rgba(0,255,0,0.1)',
+        line=dict(color='rgba(255,255,255,0)'),
+        name='95% Confidence',
+        showlegend=True
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=future_dates.tolist() + future_dates.tolist()[::-1],
+        y=lr_confidence['std1_upper'].tolist() + lr_confidence['std1_lower'].tolist()[::-1],
+        fill='toself',
+        fillcolor='rgba(0,255,0,0.2)',
+        line=dict(color='rgba(255,255,255,0)'),
+        name='68% Confidence',
+        showlegend=True
+    ), row=1, col=1)
+
+    # Add prediction lines
     fig.add_trace(go.Scatter(x=future_dates, y=future_lr,
                             name='LR Prediction',
                             line=dict(color='green', dash='dash')),
@@ -365,13 +474,13 @@ def create_candlestick_plot(df, future_lr, future_arima):
                   row=1, col=1)
 
     # Volume bar chart
-    fig.add_trace(go.Bar(x=df.index, y=df['Volume'],
+    fig.add_trace(go.Bar(x=df_filtered.index, y=df_filtered['Volume'],
                         name='Volume'),
                   row=2, col=1)
 
     # Update layout
     fig.update_layout(
-        title='Stock Price Analysis with Predictions (Last 24 Months)',
+        title='Stock Price Analysis with Predictions',
         yaxis_title='Stock Price ($)',
         yaxis2_title='Volume',
         xaxis_rangeslider_visible=False,
@@ -379,15 +488,18 @@ def create_candlestick_plot(df, future_lr, future_arima):
     )
 
     return fig
-        
-def format_prediction_summary(prices, days=90):
-    """Format prediction summary for output"""
-    intervals = [5, 10, 15, 30, 60, 90]
-    return {f"{i}d": prices[i-1] for i in intervals if i <= days}
 
 def main():
     st.set_page_config(layout="wide")
     st.title("Stock Analysis Dashboard")
+
+    # Initialize session state
+    if 'analysis_complete' not in st.session_state:
+        st.session_state.analysis_complete = False
+    if 'current_df' not in st.session_state:
+        st.session_state.current_df = None
+    if 'current_analysis' not in st.session_state:
+        st.session_state.current_analysis = None
 
     # Fixed header for inputs
     with st.container():
@@ -406,94 +518,10 @@ def main():
             analyzer = StockAnalyzer(symbol)
             with st.spinner(f'Fetching data for {symbol}...'):
                 df = analyzer.fetch_data()
-
-            if df is not None and not df.empty:
-                analysis = analyzer.analyze_position(df)  # This already shows the analysis plots
-
-                # Tables at top
-                st.markdown("### Key Metrics")
-                col1, col2, col3 = st.columns([1, 1, 1])
-                
-                # Current metrics table
-                with col1:
-                    st.subheader("Current Metrics")
-                    metrics = analysis['current_metrics']
-                    metrics_df = pd.DataFrame({
-                        'Metric': ['Current Price', 'Trading Signal', 'RSI', 'Volume Ratio', 'ATR', 
-                                 'Volatility (Annual)', 'Annual Return', 'Sharpe Ratio'],
-                        'Value': [f"${metrics['price']:.2f}", metrics['signal'], f"{metrics['rsi']:.2f}",
-                                f"{metrics['volume_ratio']:.2f}", f"{metrics['atr']:.2f}",
-                                f"{metrics['volatility']*100:.2f}%", f"{metrics['annual_return']*100:.2f}%",
-                                f"{metrics['sharpe_ratio']:.2f}"]
-                    })
-                    st.dataframe(metrics_df, hide_index=True)
-
-                # Predictions table
-                with col2:
-                    st.subheader("Price Predictions")
-                    lr_pred = analysis['predictions']['linear_regression']['prices']
-                    arima_pred = analysis['predictions']['arima']['prices']
-                    current_price = metrics['price']
-
-                    intervals = [5, 10, 15, 30, 60, 90]
-                    pred_data = []
-                    for i in intervals:
-                        if i <= prediction_days:
-                            idx = i - 1
-                            lr_price = lr_pred[idx]
-                            arima_price = arima_pred[idx]
-                            lr_pct = ((lr_price - current_price) / current_price) * 100
-                            arima_pct = ((arima_price - current_price) / current_price) * 100
-                            pred_data.append({
-                                'Horizon': f"{i}d",
-                                'Linear Regression': f"${lr_price:.2f} ({lr_pct:+.1f}%)",
-                                'ARIMA': f"${arima_price:.2f} ({arima_pct:+.1f}%)"
-                            })
-                    pred_df = pd.DataFrame(pred_data)
-                    st.dataframe(pred_df, hide_index=True)
-
-                # Model performance table
-                with col3:
-                    st.subheader("Model Performance")
-                    lr_metrics = analysis['predictions']['linear_regression']['summary']
-                    arima_metrics = analysis['predictions']['arima']['summary']
-                    perf_data = {
-                        'Metric': ['R-squared', 'RMSE', 'MAE', 'AIC', 'BIC'],
-                        'Linear Regression': [
-                            f"{lr_metrics['r_squared']:.4f}",
-                            f"{lr_metrics['rmse']:.2f}",
-                            f"{lr_metrics['mae']:.2f}",
-                            'N/A',
-                            'N/A'
-                        ],
-                        'ARIMA': [
-                            'N/A',
-                            'N/A',
-                            'N/A',
-                            f"{arima_metrics['aic']:.2f}" if arima_metrics['aic'] else 'N/A',
-                            f"{arima_metrics['bic']:.2f}" if arima_metrics['bic'] else 'N/A'
-                        ]
-                    }
-                    perf_df = pd.DataFrame(perf_data)
-                    st.dataframe(perf_df, hide_index=True)
-
-                st.markdown("---")  # Separator
-
-                # Add the candlestick chart
-                st.subheader("Price Chart (Candlestick)")
-                fig = create_candlestick_plot(
-                    df, 
-                    analysis['predictions']['linear_regression']['prices'],
-                    analysis['predictions']['arima']['prices']
-                )
-                st.plotly_chart(fig, use_container_width=True)
-
-            else:
-                st.error(f"Unable to fetch data for {symbol}. This could be due to:")
-                st.write("- Symbol may be delisted or invalid")
-                st.write("- Data provider (Yahoo Finance) temporary issues")
-                st.write("- Recent corporate actions affecting the stock")
-                st.write("Please try again later or verify the stock symbol.")
+                st.session_state.current_df = df
+                analysis = analyzer.analyze_position(df)
+                st.session_state.current_analysis = analysis
+                st.session_state.analysis_complete = True
 
         except Exception as e:
             st.error(f"Error analyzing {symbol}: {str(e)}")
@@ -501,6 +529,39 @@ def main():
             st.write("1. Verify the stock symbol")
             st.write("2. Check if the stock is actively traded")
             st.write("3. Try again in a few minutes")
+            return
+
+    # Display results if analysis is complete
+    if st.session_state.analysis_complete and st.session_state.current_df is not None:
+        df = st.session_state.current_df
+        analysis = st.session_state.current_analysis
+
+        # Your existing metrics tables code here...
+        
+        st.markdown("---")  # Separator
+
+        # Add the candlestick chart
+        st.subheader("Price Chart (Candlestick)")
+
+        # Calculate total days in the dataset
+        total_days = (df.index.max() - df.index.min()).days
+
+        # Create a slider for selecting the number of days to display
+        display_days = st.slider("Select time window (days)", 
+                       min_value=5,    # Minimum 5 days
+                       max_value=60,   # Maximum 60 days
+                       value=30,       # Default to 30 days
+                       step=1)         # Single day steps
+
+        # In your main function, modify the candlestick plot creation:
+        fig = create_candlestick_plot(
+            df, 
+            analysis['predictions']['linear_regression']['prices'],
+            analysis['predictions']['arima']['prices'],
+            analysis['predictions']['linear_regression']['confidence_intervals'],
+            display_days
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 if __name__ == "__main__":
     main()
